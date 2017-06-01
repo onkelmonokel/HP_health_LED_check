@@ -1,0 +1,116 @@
+#!/bin/bash
+#
+# Combined Nagios and NHC plugin for reading System Health LED status
+# Nagios plugin reads LED status with ipmitool and optionally writes status file for NHC to read
+
+# Flags
+# -i to read LED status and report to icinga
+# -c to create statusfile for NHC
+# -p to define path for LED status dir
+ICINGA='false'
+CREATEFILE='false'
+LEDDIRPATH="/tmp/LED"
+LEDFILEPATH="$LEDDIRPATH/status"
+
+# Exit values Icinga
+OK=0
+WARNING=1
+CRITICAL=2
+UNKNOWN=3
+
+# LED values
+LEDVAL=""
+LEDOK="0x00"
+LEDWARNING="0x01"
+LEDNOREAD="no"
+
+# Read flags
+while getopts 'icp:' f;do
+    case "${f}" in
+        i) ICINGA='true' ;;
+	    c) CREATEFILE='true' ;;
+	    p) LEDDIRPATH="$OPTARG" ;;
+	    :) echo "Missing option argument for -$OPTARG" >&2 ;;
+	    *) echo "Options: -i -c -p <path>" >&2 ;;
+    esac
+done
+
+# Functions
+# ----------------
+# Report to Icinga
+# ----------------
+function report_to_icinga() {
+    if [ $LEDVAL == $LEDWARNING ];then
+        echo "WARNING - System Health LED indicating degraded system"
+        exit $WARNING
+    elif [ $LEDVAL == $LEDNOREAD ];then
+        echo "UNKNOWN - System Health LED cannot be read"
+        exit $UNKNOWN
+    elif [ $LEDVAL != $LEDOK ];then
+        echo "CRITICAL - System Health LED indicating critical system"
+        exit $CRITICAL
+    else
+        echo "OK - System Health LED OK"
+        exit $OK
+    fi
+}
+
+# Create System Health LED status file for NHC
+function create_led_status_file() {
+    if [ ! -d "$LEDDIRPATH" ];then
+        mkdir "$LEDDIRPATH"
+    fi
+    echo "$LEDVAL" > "$LEDFILEPATH"
+}
+
+function health_led_gather_data() {
+    LEDVAL=$(sudo ipmitool sdr|grep "Sys Health LED"|awk '{print $5}')
+}
+
+# Check if Nagios should check value and report to Icinga
+if [ $ICINGA = true ];then
+    health_led_gather_data
+
+    if [ $CREATEFILE = true ];then
+        create_led_status_file
+    fi
+
+    report_to_icinga
+fi
+
+# ----------------
+# Report to NHC
+# ----------------
+function nhc_report_led_status() {
+    if [ -z "$LEDVAL" ];then
+	log "check_health_led(): System Health LED status file not found. Read value not set"
+        return 0
+    fi
+
+    if [ $LEDVAL == $LEDWARNING ];then
+        log "check_health_led: System Health LED indicating degraded system. Value: $LEDVAL"
+        die 1 "$FUNCNAME: System Health LED indicating degraded system"
+        return 1
+    elif [ $LEDVAL != $LEDOK ];then
+        log "check_health_led(): System Health LED indicating critical system. Value: $LEDVAL"
+        die 1 "$FUNCNAME: System Health LED indicating critical system"
+        return 1
+    else
+        return 0
+    fi
+}
+
+# Read LEDfile value
+function nhc_health_led_read_file() {
+    if [ -f "$LEDFILEPATH" ];then
+        read -r LINE < "$LEDFILEPATH"
+	LEDVAL=$LINE
+    fi
+}
+
+# Check System Health LED status
+function nhc_check_health_led() {
+    nhc_health_led_read_file
+    nhc_report_led_status
+}
+# ----------------
